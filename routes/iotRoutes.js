@@ -53,7 +53,17 @@ router.post('/webhook', (req, res) => {
   }
   
   // This is actual device data - forward to receiveIoTData handler
-  receiveIoTData(req, res);
+  // receiveIoTData is async, but Express handles promises automatically
+  receiveIoTData(req, res).catch(err => {
+    console.error('Error in receiveIoTData:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Internal server error',
+        error: err.message,
+      });
+    }
+  });
 });
 
 export default router;
