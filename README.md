@@ -8,6 +8,7 @@ A single source of truth for receiving, parsing, and storing CPAP/BIPAP device t
 - [Setup](#setup)
 - [Environment Variables](#environment-variables)
 - [Running the Server](#running-the-server)
+- [HTTP Methods Explained](#http-methods-explained)
 - [API Endpoints](#api-endpoints)
 - [Postman Testing](#postman-testing)
 - [IoT Rule & Webhook](#iot-rule--webhook)
@@ -69,6 +70,13 @@ A single source of truth for receiving, parsing, and storing CPAP/BIPAP device t
   npm start
   ```
 The API will be reachable at `http://localhost:<PORT>`.
+
+## HTTP Methods Explained
+- **GET** – Ask the API to give back data without changing anything. Example: `GET /api/devices/24/data` returns saved records for device 24.
+- **POST** – Send new information to the API so it can store it. Example: `POST /api/devices/data` pushes telemetry.
+- **PUT** – Replace an existing resource with a fresh version. Example: `PUT /api/devices/:deviceId/config` would overwrite a device’s configuration.
+- **PATCH** – Make a small update without sending the whole object. (This API mostly keeps writing with POST/PUT.)
+- **DELETE** – Remove something from the database. Not used frequently in this project.
 
 ## API Endpoints
 ### Health Check
