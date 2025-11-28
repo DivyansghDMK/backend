@@ -147,6 +147,15 @@ export const receiveECGData = async (req, res) => {
     if (jsonTwinData) {
       parsedECGData = jsonTwinData;
     } else if (!parsedECGData) {
+      // Validate that we have at least JSON data or metadata
+      if (!ecg_json_data && !uploadMetadata) {
+        return res.status(400).json({
+          success: false,
+          message: 'ecg_json_data is required (or provide file + metadata in multipart/form-data)',
+          requestId,
+        });
+      }
+      
       // Create minimal structure from upload metadata
       parsedECGData = {
         timestamp: uploadMetadata?.uploaded_at || uploadMetadata?.report_date || new Date().toISOString(),
