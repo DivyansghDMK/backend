@@ -6,10 +6,23 @@ import mongoose from 'mongoose';
  * Receive and store ECG data (JSON + PDF)
  * POST /api/ecg/data
  * 
- * Accepts:
- * - JSON data as object or string
- * - PDF as base64 string or Buffer
- * - Device/patient metadata
+ * Accepts multiple formats:
+ * 1. Multipart/form-data (from cloud_uploader.py):
+ *    - file: PDF/JSON file (binary)
+ *    - metadata: JSON string with upload_metadata structure
+ * 
+ * 2. JSON body (legacy/API format):
+ *    - ecg_json_data: JSON object or string (index.json structure)
+ *    - ecg_pdf_data: base64 encoded PDF
+ *    - device_id, patient_id, etc.
+ * 
+ * Expected JSON structure (index.json format):
+ * {
+ *   "timestamp": "2025-11-18 13:16:34",
+ *   "file": "/path/to/file.pdf",
+ *   "patient": { "name": "...", "age": "...", "gender": "...", "date_time": "..." },
+ *   "metrics": { "HR_bpm": 75, "PR_ms": 160, ... }
+ * }
  */
 export const receiveECGData = async (req, res) => {
   const requestId = `ecg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -32,6 +45,48 @@ export const receiveECGData = async (req, res) => {
       }
     }
 
+    // Handle multipart/form-data (from cloud_uploader.py)
+    let uploadMetadata = null;
+    let pdfBuffer = null;
+    let jsonTwinData = null;
+    let parsedECGData = null;
+    let filename = null;
+
+    if (req.file) {
+      // Multipart/form-data upload
+      const file = req.file;
+      const metadataStr = req.body.metadata;
+
+      if (!file) {
+        return res.status(400).json({
+          success: false,
+          message: 'File is required in multipart/form-data',
+          requestId,
+        });
+      }
+
+      if (metadataStr) {
+        try {
+          uploadMetadata = typeof metadataStr === 'string' 
+            ? JSON.parse(metadataStr) 
+            : metadataStr;
+        } catch (error) {
+          console.warn(`[${requestId}] ⚠️ Failed to parse metadata: ${error.message}`);
+        }
+      }
+
+      filename = uploadMetadata?.filename || file.originalname || file.name;
+      const fileType = filename.split('.').pop().toLowerCase();
+
+      if (fileType === 'pdf') {
+        pdfBuffer = file.buffer || Buffer.from(file.data);
+      } else if (fileType === 'json') {
+        jsonTwinData = JSON.parse(file.buffer.toString('utf-8') || file.data.toString('utf-8'));
+        parsedECGData = jsonTwinData;
+      }
+    }
+
+    // Handle JSON body format (legacy/API)
     const {
       device_id,
       patient_id,
@@ -48,128 +103,176 @@ export const receiveECGData = async (req, res) => {
       data_source = 'software',
     } = req.body;
 
-    // Validation
-    if (!device_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'device_id is required',
-      });
+    // Parse JSON data if provided in body (legacy format)
+    if (ecg_json_data && !parsedECGData) {
+      try {
+        parsedECGData = typeof ecg_json_data === 'string' 
+          ? JSON.parse(ecg_json_data) 
+          : ecg_json_data;
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid JSON data: ${error.message}`,
+          requestId,
+        });
+      }
     }
 
-    if (!ecg_json_data) {
-      return res.status(400).json({
-        success: false,
-        message: 'ecg_json_data is required',
-      });
-    }
-
-    if (!ecg_pdf_data && !ecg_pdf_buffer) {
-      return res.status(400).json({
-        success: false,
-        message: 'ecg_pdf_data (base64) or ecg_pdf_buffer is required',
-      });
-    }
-
-    // Parse JSON data if it's a string
-    let parsedECGData;
-    try {
-      parsedECGData = typeof ecg_json_data === 'string' 
-        ? JSON.parse(ecg_json_data) 
-        : ecg_json_data;
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: `Invalid JSON data: ${error.message}`,
-      });
-    }
-
-    // Convert PDF from base64 to Buffer if needed
-    let pdfBuffer;
-    if (ecg_pdf_buffer) {
+    // Convert PDF from base64 to Buffer if needed (legacy format)
+    if (!pdfBuffer && ecg_pdf_buffer) {
       pdfBuffer = Buffer.isBuffer(ecg_pdf_buffer) 
         ? ecg_pdf_buffer 
         : Buffer.from(ecg_pdf_buffer);
-    } else if (ecg_pdf_data) {
+    } else if (!pdfBuffer && ecg_pdf_data) {
       // Handle base64 encoded PDF
       const base64Data = ecg_pdf_data.replace(/^data:application\/pdf;base64,/, '');
       pdfBuffer = Buffer.from(base64Data, 'base64');
     }
 
-    // Validate PDF buffer
-    if (!pdfBuffer || pdfBuffer.length === 0) {
+    // Validation
+    const finalDeviceId = device_id || uploadMetadata?.machine_serial || 'unknown';
+    if (!finalDeviceId || finalDeviceId === 'unknown') {
       return res.status(400).json({
         success: false,
-        message: 'Invalid PDF data',
+        message: 'device_id or machine_serial is required',
+        requestId,
       });
     }
 
-    // Generate file keys
-    const timestamp = recording_date ? new Date(recording_date) : new Date();
-    const jsonKey = generateECGFileKey(device_id, 'json', timestamp);
-    const pdfKey = generateECGFileKey(device_id, 'pdf', timestamp);
+    // PDF is optional for testing (if only JSON data is provided)
+    // If no PDF, we'll only store JSON data
+    const hasPDF = pdfBuffer && pdfBuffer.length > 0;
+
+    // If we have JSON twin data, use it; otherwise use parsedECGData or create from metadata
+    if (jsonTwinData) {
+      parsedECGData = jsonTwinData;
+    } else if (!parsedECGData) {
+      // Create minimal structure from upload metadata
+      parsedECGData = {
+        timestamp: uploadMetadata?.uploaded_at || uploadMetadata?.report_date || new Date().toISOString(),
+        file: uploadMetadata?.filename || filename,
+        patient: uploadMetadata ? {
+          name: uploadMetadata.patient_name,
+          age: uploadMetadata.patient_age,
+          gender: null,
+          date_time: uploadMetadata.report_date,
+        } : null,
+        metrics: uploadMetadata?.heart_rate ? {
+          HR_bpm: parseInt(uploadMetadata.heart_rate) || null,
+        } : null,
+      };
+    }
+
+    // Extract data from parsedECGData structure
+    const reportTimestamp = parsedECGData?.timestamp 
+      ? new Date(parsedECGData.timestamp) 
+      : (recording_date ? new Date(recording_date) : new Date());
+    
+    const patientInfo = parsedECGData?.patient || null;
+    const metrics = parsedECGData?.metrics || null;
+    
+    // Use filename from metadata or generate from timestamp
+    if (!filename && uploadMetadata?.filename) {
+      filename = uploadMetadata.filename;
+    } else if (!filename) {
+      const timestampStr = reportTimestamp.toISOString().replace(/[:.]/g, '-').split('.')[0];
+      filename = `ECG_Report_${timestampStr}.pdf`;
+    }
+
+    // Generate S3 keys using new format: ecg-reports/YYYY/MM/DD/filename
+    const pdfKey = generateECGFileKey(finalDeviceId, 'pdf', reportTimestamp, filename);
+    
+    // Generate JSON key (if JSON twin exists or needs to be created)
+    let jsonKey = null;
+    let jsonTwinKey = null;
+    if (jsonTwinData || parsedECGData) {
+      const jsonFilename = filename.replace('.pdf', '.json');
+      jsonTwinKey = generateECGFileKey(finalDeviceId, 'json', reportTimestamp, jsonFilename);
+      jsonKey = jsonTwinKey;
+    }
 
     console.log(`[${requestId}] 📤 Uploading files to S3...`);
 
-    // Upload JSON to S3
-    const jsonUploadResult = await uploadJSONToS3(
-      parsedECGData,
-      `${device_id}_ecg.json`,
-      {
-        device_id,
-        patient_id: patient_id || '',
-        session_id: session_id || '',
-        recording_date: recording_date || timestamp.toISOString(),
-      }
-    );
+    // Upload PDF to S3 (if provided)
+    let pdfUploadResult = null;
+    if (hasPDF) {
+      const pdfMetadata = uploadMetadata || {};
+      pdfUploadResult = await uploadPDFToS3(
+        pdfBuffer,
+        filename || 'ecg_report.pdf',
+        pdfMetadata
+      );
+    }
 
-    // Upload PDF to S3
-    const pdfUploadResult = await uploadPDFToS3(
-      pdfBuffer,
-      `${device_id}_ecg.pdf`,
-      {
-        device_id,
-        patient_id: patient_id || '',
-        session_id: session_id || '',
-        recording_date: recording_date || timestamp.toISOString(),
-      }
-    );
+    // Upload JSON twin file if we have JSON data
+    let jsonUploadResult = null;
+    let jsonTwinUploadResult = null;
+    if (jsonTwinData || parsedECGData) {
+      const jsonDataToUpload = jsonTwinData || parsedECGData;
+      const jsonMetadata = uploadMetadata || {};
+      const jsonFilename = filename ? filename.replace('.pdf', '.json') : 'ecg_data.json';
+      jsonTwinUploadResult = await uploadJSONToS3(
+        jsonDataToUpload,
+        jsonFilename,
+        jsonMetadata
+      );
+      jsonUploadResult = jsonTwinUploadResult;
+    }
 
     console.log(`[${requestId}] ✅ Files uploaded to S3`);
 
     // Extract metadata from JSON data if available
     const extractedMetadata = {
-      recording_date: recording_date || parsedECGData.recording_date || parsedECGData.timestamp || timestamp,
-      recording_duration: recording_duration || parsedECGData.duration || parsedECGData.recording_duration,
-      sample_rate: sample_rate || parsedECGData.sample_rate || parsedECGData.sampling_rate,
-      leads: leads || parsedECGData.leads || parsedECGData.channels || [],
+      recording_date: recording_date || parsedECGData?.recording_date || parsedECGData?.timestamp || reportTimestamp,
+      recording_duration: recording_duration || parsedECGData?.duration || parsedECGData?.recording_duration,
+      sample_rate: sample_rate || parsedECGData?.sample_rate || parsedECGData?.sampling_rate,
+      leads: leads || parsedECGData?.leads || parsedECGData?.channels || [],
+    };
+
+    // Prepare upload_metadata structure
+    const finalUploadMetadata = uploadMetadata || {
+      filename: filename,
+      uploaded_at: new Date().toISOString(),
+      file_size: pdfBuffer.length,
+      file_type: '.pdf',
+      patient_name: patientInfo?.name || patient_id || null,
+      patient_age: patientInfo?.age || null,
+      report_date: patientInfo?.date_time || reportTimestamp.toISOString(),
+      machine_serial: finalDeviceId,
+      heart_rate: metrics?.HR_bpm?.toString() || null,
     };
 
     // Create ECG data record
     const ecgDataRecord = new ECGData({
-      device_id,
-      patient_id: patient_id || parsedECGData.patient_id || null,
-      session_id: session_id || parsedECGData.session_id || null,
-      ecg_data: parsedECGData,
-      json_s3_key: jsonUploadResult.s3_key,
-      json_s3_url: jsonUploadResult.s3_url,
-      pdf_s3_key: pdfUploadResult.s3_key,
-      pdf_s3_url: pdfUploadResult.s3_url,
-      s3_bucket: jsonUploadResult.bucket,
+      device_id: finalDeviceId,
+      patient_id: patient_id || patientInfo?.name || null,
+      session_id: session_id || null,
+      ecg_data: parsedECGData || {},
+      upload_metadata: finalUploadMetadata,
+      patient: patientInfo,
+      metrics: metrics,
+      json_s3_key: jsonUploadResult?.s3_key || null,
+      json_s3_url: jsonUploadResult?.s3_url || null,
+      pdf_s3_key: pdfUploadResult?.s3_key || null,
+      pdf_s3_url: pdfUploadResult?.s3_url || null,
+      json_twin_s3_key: jsonTwinUploadResult?.s3_key || null,
+      json_twin_s3_url: jsonTwinUploadResult?.s3_url || null,
+      s3_bucket: pdfUploadResult?.bucket || jsonUploadResult?.bucket || 'unknown',
       file_metadata: {
-        json_size: Buffer.byteLength(JSON.stringify(parsedECGData)),
-        pdf_size: pdfBuffer.length,
+        json_size: parsedECGData ? Buffer.byteLength(JSON.stringify(parsedECGData)) : 0,
+        pdf_size: pdfBuffer?.length || 0,
         json_content_type: 'application/json',
-        pdf_content_type: 'application/pdf',
+        pdf_content_type: hasPDF ? 'application/pdf' : null,
       },
-      recording_date: extractedMetadata.recording_date ? new Date(extractedMetadata.recording_date) : timestamp,
+      recording_date: extractedMetadata.recording_date ? new Date(extractedMetadata.recording_date) : reportTimestamp,
       recording_duration: extractedMetadata.recording_duration,
       sample_rate: extractedMetadata.sample_rate,
       leads: extractedMetadata.leads,
       status: 'uploaded',
-      data_source,
+      data_source: data_source || (uploadMetadata ? 'api' : 'software'),
       linked_device_id: linked_device_id || null,
       linked_device_type: linked_device_type || null,
-      timestamp,
+      timestamp: reportTimestamp,
     });
 
     await ecgDataRecord.save();
@@ -184,7 +287,7 @@ export const receiveECGData = async (req, res) => {
         patient_id: ecgDataRecord.patient_id,
         session_id: ecgDataRecord.session_id,
         json_s3_url: ecgDataRecord.json_s3_url,
-        pdf_s3_url: ecgDataRecord.pdf_s3_url,
+        pdf_s3_url: ecgDataRecord.pdf_s3_url || null,
         recording_date: ecgDataRecord.recording_date,
         timestamp: ecgDataRecord.timestamp,
       },

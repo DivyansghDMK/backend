@@ -1,6 +1,6 @@
-# CPAP/BIPAP Device Data API
+# Medical Device Data API
 
-A single source of truth for receiving, parsing, and storing CPAP/BIPAP device telemetry and configuration data.
+A single source of truth for receiving, parsing, and storing medical device telemetry data. Supports CPAP/BIPAP devices, ECG data, and OC (Oxygen Concentrator) devices with realtime mobile-machine communication.
 
 ## Table of Contents
 - [Features](#features)
@@ -18,9 +18,9 @@ A single source of truth for receiving, parsing, and storing CPAP/BIPAP device t
 - [Archived Guides](#archived-guides)
 
 ## Features
-- Receives MQTT-originated data via an IoT webhook and direct device payloads via `/api/devices/data`.
-- Parses CPAP/BIPAP data strings into structured fields and persists them to MongoDB.
-- Tracks configuration updates pushed back to devices and records delivery acknowledgements.
+- **CPAP/BIPAP API**: Receives MQTT-originated data via an IoT webhook and direct device payloads. Parses device data strings into structured fields and persists them to MongoDB. Tracks configuration updates pushed back to devices.
+- **ECG API**: Handles ECG data with JSON and PDF file storage in AWS S3, with presigned URL generation for secure access.
+- **OC API**: Manages Oxygen Concentrator devices with realtime bidirectional communication between mobile apps and machines. Supports data storage and status tracking.
 - Supports AWS IoT Core forwarding and manual Postman/cURL testing.
 
 ## Prerequisites
@@ -79,9 +79,14 @@ The API will be reachable at `http://localhost:<PORT>`.
 - **DELETE** – Remove something from the database. Not used frequently in this project.
 
 ## API Endpoints
+
 ### Health Check
 - `GET /health`
 - Returns `200 OK` with a heartbeat message.
+
+---
+
+## CPAP/BIPAP Device API
 
 ### Receive Device Data
 - `POST /api/devices/data`
@@ -170,8 +175,118 @@ The API will be reachable at `http://localhost:<PORT>`.
   ```
 - Response mirrors the direct endpoint and returns `config_update` metadata.
 
+---
+
+## ECG Data API
+
+### Receive ECG Data
+- `POST /api/ecg/data`
+- Receives ECG data with JSON and PDF files, stores them in AWS S3, and saves metadata to MongoDB.
+- Required fields:
+  ```json
+  {
+    "device_id": "ecg_device_001",
+    "patient_id": "patient_123",
+    "ecg_json": { /* ECG data object */ },
+    "ecg_pdf": "base64_encoded_pdf_string"
+  }
+  ```
+- Response includes S3 URLs and record ID.
+
+### Get ECG Data
+- `GET /api/ecg/data?device_id=xxx&patient_id=xxx&limit=10`
+- Retrieves ECG records with optional filtering and pagination.
+
+### Get ECG Record by ID
+- `GET /api/ecg/data/:recordId`
+- Returns a specific ECG record with metadata.
+
+### Get Presigned URLs
+- `POST /api/ecg/data/:recordId/presigned-urls`
+- Generates temporary presigned URLs for accessing S3 files.
+
+---
+
+## OC (Oxygen Concentrator) API
+
+### Receive OC Data
+- `POST /api/oc/data`
+- Handles realtime communication between mobile apps and machines, plus data storage.
+
+**Format 1: Mobile App Request**
+```json
+{
+  "device_status": 1,
+  "device_data": 0,
+  "device_id": "12345678"
+}
+```
+- `device_status: 1` indicates request from mobile
+- `device_data: 0/1/2/3` represents command/status code
+
+**Format 2: Machine Acknowledgement**
+```json
+{
+  "device_status": 0,
+  "device_data": 0,
+  "device_id": "12345678"
+}
+```
+- `device_status: 0` indicates acknowledgement from machine
+- `device_data: 0/1/2/3` represents response code
+
+**Format 3: Data Storage**
+```json
+{
+  "device_data": "power_status, alm_status",
+  "device_id": "12345678"
+}
+```
+- Stores device data as comma-separated string
+- Automatically parses into `power_status` and `alm_status`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "OC data received and stored",
+  "data": {
+    "id": "67890abcdef123456",
+    "device_id": "12345678",
+    "device_status": 1,
+    "device_data": 0,
+    "source": "mobile",
+    "timestamp": "2025-11-27T10:30:45.123Z"
+  }
+}
+```
+
+### Get OC Data History
+- `GET /api/oc/data/:deviceId?limit=50&source=mobile&device_status=1`
+- Retrieves historical OC data for a device with optional filters:
+  - `limit`: Number of records (default: 50)
+  - `source`: Filter by `mobile`, `machine`, or `direct`
+  - `device_status`: Filter by `0` (ack) or `1` (request)
+
+### Get Latest OC Data
+- `GET /api/oc/data/:deviceId/latest`
+- Returns the most recent OC data record for a device.
+
+### Update OC Data
+- `PUT /api/oc/data/:deviceId`
+- Updates device data in storage format:
+  ```json
+  {
+    "device_data": "power_status, alm_status"
+  }
+  ```
+- Automatically parses and stores the comma-separated values.
+
+---
+
 ## Postman Testing
-Use Postman for quick sanity checks or for demonstrating API behavior to teammates.
+
+### CPAP/BIPAP Device Testing
 1. Create a POST request to `https://backend-production-9c17.up.railway.app/api/devices/data`.
 2. Set header `Content-Type: application/json`.
 3. Send payload (example for CPAP):
@@ -183,24 +298,60 @@ Use Postman for quick sanity checks or for demonstrating API behavior to teammat
      "device_id": "24"
    }
    ```
-4. Expect `200 OK` with:
-   ```json
-   {
-     "success": true,
-     "message": "Device data received and saved",
-     "data": {
-       "device_id": "24",
-       "device_type": "CPAP",
-       "timestamp": "2025-11-20T10:30:45.123Z",
-       "record_id": "67890abcdef123456"
-     }
-   }
-   ```
+4. Expect `200 OK` with success response.
 5. For IoT-style payloads, POST to `/api/iot/webhook` with identical JSON plus the `topic` field (e.g., `esp32/data24`).
-6. Watch for success indicators:
-   - `200 OK` and `success: true` in the response body
-   - `config_update.available`/`published` flags indicate pending device config
-   - If the server responds with `503 Database unavailable`, verify MongoDB connectivity
+
+### OC API Testing
+
+**Test Mobile Request:**
+```bash
+POST https://backend-production-9c17.up.railway.app/api/oc/data
+Content-Type: application/json
+
+{
+  "device_status": 1,
+  "device_data": 2,
+  "device_id": "12345678"
+}
+```
+
+**Test Machine Acknowledgement:**
+```bash
+POST https://backend-production-9c17.up.railway.app/api/oc/data
+Content-Type: application/json
+
+{
+  "device_status": 0,
+  "device_data": 2,
+  "device_id": "12345678"
+}
+```
+
+**Test Data Storage:**
+```bash
+POST https://backend-production-9c17.up.railway.app/api/oc/data
+Content-Type: application/json
+
+{
+  "device_data": "ON, OK",
+  "device_id": "12345678"
+}
+```
+
+**Get OC Data History:**
+```bash
+GET https://backend-production-9c17.up.railway.app/api/oc/data/12345678?limit=10&source=mobile
+```
+
+**Get Latest OC Data:**
+```bash
+GET https://backend-production-9c17.up.railway.app/api/oc/data/12345678/latest
+```
+
+### Success Indicators
+- `200 OK` and `success: true` in the response body
+- `config_update.available`/`published` flags indicate pending device config (CPAP/BIPAP)
+- If the server responds with `503 Database unavailable`, verify MongoDB connectivity
 
 ## IoT Rule & Webhook
 AWS IoT Core rules forward device MQTT data to the webhook. Use the following SQL + template in your rule:
@@ -242,21 +393,40 @@ Ensure the HTTP action posts to `https://backend-production-9c17.up.railway.app/
 - [ ] Payload includes all required fields and formats `device_data` correctly.
 
 ## Common Errors
+
+### CPAP/BIPAP API
 - `400 device_status is required`: Add `device_status` (0 or 1).
 - `400 device_data is required`: Provide the raw CPAP/BIPAP string (starts with `*,` and ends with `,#`).
 - `400 device_type is required and must be CPAP or BIPAP`: Supply a valid type.
 - `400 Failed to parse device data`: Check `device_data` formatting and remove stray spaces.
+
+### OC API
+- `400 device_id is required`: Provide `device_id` in the request body.
+- `400 device_data is required`: Provide `device_data` (number 0-3 for realtime, or string for storage).
+- `400 device_status must be 0 (acknowledgement) or 1 (request)`: Use valid status values.
+- `400 device_data must be 0, 1, 2, or 3 for realtime communication`: Use valid numeric codes.
+- `400 device_data must be a string for data storage format`: Use string format like "power_status, alm_status".
+
+### General
 - `503 Database unavailable`: MongoDB is unreachable—check `MONGODB_URI` and Atlas network access.
 
 ## Data Validation
-### Via API
+
+### CPAP/BIPAP Data
 - `GET https://backend-production-9c17.up.railway.app/api/devices/:deviceId/data?limit=5`
 - Optional query `data_source=cloud` or `data_source=software` filters the results.
 
+### OC Data
+- `GET https://backend-production-9c17.up.railway.app/api/oc/data/:deviceId?limit=10`
+- Optional queries: `source=mobile|machine|direct`, `device_status=0|1`
+
 ### Via MongoDB Atlas
 1. Open Atlas → Database → Collections.
-2. Look at the `devicedatas` collection for recent documents.
-3. Filter by `device_id`, `data_source`, and `timestamp` to confirm new records appear.
+2. Check collections:
+   - `devicedatas` - CPAP/BIPAP device data
+   - `ecgdatas` - ECG records
+   - `ocdatas` - OC device data
+3. Filter by `device_id`, `data_source`/`source`, and `timestamp` to confirm new records appear.
 
 ## Archived Guides
 All legacy `.md` guides (Postman testing notes, IoT setup, troubleshooting steps, etc.) have been relocated to `archived_markdown/` as `.txt` files so that this README remains the single Markdown source. Refer to that directory if you need historic context or additional examples.

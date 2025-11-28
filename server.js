@@ -6,6 +6,7 @@ import connectDB from './config/database.js';
 import deviceRoutes from './routes/deviceRoutes.js';
 import iotRoutes from './routes/iotRoutes.js';
 import ecgRoutes from './routes/ecgRoutes.js';
+import ocRoutes from './routes/ocRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -28,7 +29,7 @@ app.use(morgan('dev'));
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Medical Device Data API (CPAP/BIPAP/ECG)',
+    message: 'Medical Device Data API (CPAP/BIPAP/ECG/OC)',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
     endpoints: {
@@ -43,6 +44,10 @@ app.get('/', (req, res) => {
       getECGData: 'GET /api/ecg/data',
       getECGRecord: 'GET /api/ecg/data/:recordId',
       getECGPresignedURLs: 'POST /api/ecg/data/:recordId/presigned-urls',
+      ocData: 'POST /api/oc/data',
+      getOCDataHistory: 'GET /api/oc/data/:deviceId',
+      getLatestOCData: 'GET /api/oc/data/:deviceId/latest',
+      updateOCData: 'PUT /api/oc/data/:deviceId',
     },
     documentation: 'See README.md for full API documentation',
   });
@@ -61,6 +66,7 @@ app.get('/health', (req, res) => {
 app.use('/api/devices', deviceRoutes);
 app.use('/api/iot', iotRoutes);
 app.use('/api/ecg', ecgRoutes);
+app.use('/api/oc', ocRoutes);
 
 // 404 handler
 app.use((req, res) => {

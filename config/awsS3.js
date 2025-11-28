@@ -135,9 +135,20 @@ export async function getPresignedURL(s3Key, expiresIn = 3600) {
  * @param {string} deviceId - Device ID
  * @param {string} fileType - 'json' or 'pdf'
  * @param {Date} timestamp - Optional timestamp (defaults to now)
+ * @param {string} filename - Optional filename (if provided, uses ecg-reports/YYYY/MM/DD/filename format)
  * @returns {string} - S3 key
  */
-export function generateECGFileKey(deviceId, fileType, timestamp = new Date()) {
+export function generateECGFileKey(deviceId, fileType, timestamp = new Date(), filename = null) {
+  if (filename) {
+    // Use ecg-reports/YYYY/MM/DD/filename format from documentation
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `ecg-reports/${year}/${month}/${day}/${filename}`;
+  }
+  
+  // Legacy format: deviceId/YYYY-MM-DD/timestamp.extension
   const dateStr = timestamp.toISOString().split('T')[0]; // YYYY-MM-DD
   const timeStr = timestamp.toISOString().replace(/[:.]/g, '-').split('.')[0]; // YYYY-MM-DDTHH-MM-SS
   const extension = fileType === 'json' ? 'json' : 'pdf';
